@@ -1,6 +1,7 @@
 import os
 import torch
 import numpy as np
+import imageio
 from pathlib import Path
 from loguru import logger
 from einops import rearrange
@@ -96,9 +97,54 @@ def main():
         final_frames = np.stack(final_frames, axis=0)
         
         if rank == 0:
-            from hymm_sp.data_kits.ffmpeg_utils import save_video
-            save_video(final_frames, output_path, n_rows=len(final_frames), fps=fps.item())
-            os.system(f"ffmpeg -i '{output_path}' -i '{audio_path}' -shortest '{output_audio_path}' -y -loglevel quiet; rm '{output_path}'")
+        #from hymm_sp.data_kits.ffmpeg_utils import save_video
+        #save_video(final_frames, output_path, n_rows=len(final_frames), fps=fps.item())
+        #imageio.mimsave(output_path, final_frames, fps=fps.item())
+        #os.system(f"ffmpeg -i '{output_path}' -i '{audio_path}' -shortest '{output_audio_path}' -y -loglevel quiet; rm '{output_path}'")
+        # 确保帧数据是 uint8 类型 (0-255)
+        if final_frames.dtype != np.uint8:
+            logger.warning(f"Frames are {final_frames.dtype}, attempting to convert to uint8.")
+            if final_frames.max() <= 1.0 and final_frames.min() >= 0.0: # Heuristic for float 0-1
+                final_frames = (final_frames * 255).astype(np.uint8)
+            else: # Assume already in 0-255 range but wrong type
+                final_frames = final_frames.astype(np.uint8)
+    
+        # 使用 imageio 输出高质量 MP4
+        # ffmpeg_params 控制编码质量
+        # -vcodec libx264: 使用 H.264 编码器
+        # -crf 18: Constant Rate Factor, 0-51, 值越小质量越高，18-23 通常是很好的平衡
+        # -preset medium: 编码速度与压缩率的平衡，可选: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+        # -pix_fmt yuv420p: 像素格式，保证更广泛的播放器兼容性
+        ffmpeg_video_params = [
+            '-vcodec', 'libx264',
+            '-crf', '16',
+            '-preset', 'slower',
+            '-pix_fmt', 'yuv420p'
+        ]
+        logger.info(f"Saving intermediate video to: {output_path} with fps: {fps.item()}")
+        imageio.mimsave(output_path, final_frames, format='mp4', fps=fps.item(), ffmpeg_params=ffmpeg_video_params)
+    
+        # ffmpeg 命令合并音视频
+        # -c:v copy: 直接复制视频流，不重新编码，前提是 imageio 输出的视频已经是我们想要的格式和质量
+        # -c:a aac: 使用 AAC 音频编码 (如果原始音频不是 AAC 或者需要控制比特率)
+        # -b:a 192k: 音频比特率 (可选)
+        # -shortest: 以最短的输入流（视频或音频）长度为准
+        # -y: 覆盖输出文件不提示
+        # -loglevel quiet: 安静模式
+        ffmpeg_merge_cmd = (
+            f"ffmpeg -i '{output_path}' -i '{audio_path}' "
+            f"-c:v copy -c:a aac -shortest '{output_audio_path}' -y -loglevel quiet"
+        )
+        logger.info(f"Merging video and audio. Command: {ffmpeg_merge_cmd}")
+        result_code = os.system(ffmpeg_merge_cmd)
+    
+        if result_code == 0:
+            logger.info(f"Successfully created video with audio: {output_audio_path}")
+            logger.info(f"Removing intermediate video: {output_path}")
+            os.remove(output_path)
+        else:
+            logger.error(f"ffmpeg command failed with exit code {result_code}. Intermediate file '{output_path}' not removed.")
+
 
 
 
